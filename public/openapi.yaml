@@ -1,0 +1,38 @@
+openapi: 3.1.0
+info:
+  title: Lynn Bootstrap API
+  description: 最小启动版：用于验证 ChatGPT Actions 能访问你的域名与鉴权。
+  version: 0.0.1
+servers:
+  - url: https://api.mediairevive.com.au
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: 健康检查（无需鉴权）
+      responses:
+        '200':
+          description: 服务健康状态
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  service: { type: string }
+                  version: { type: string }
+  /meta:
+    get:
+      operationId: getMeta
+      summary: 元信息（需要 Bearer）
+      responses:
+        '200':
+          description: Meta
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  api: { type: string }
+                  auth: { type: string }
+components: {}
