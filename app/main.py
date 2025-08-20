@@ -1,30 +1,41 @@
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
-import os
+import os, hashlib
 
 app = FastAPI(title="Lynn Minimal", version="0.0.1")
 
-# 从环境变量读取 Token
-API_TOKEN = os.getenv("LYNN_API_TOKEN")
+API_TOKEN = os.getenv("LYNN_API_TOKEN", "")
+
+def _mask(s: str) -> str:
+    if not s:
+        return "EMPTY"
+    return f"{s[:3]}...{s[-3:]} (len={len(s)}) sha256={hashlib.sha256(s.encode()).hexdigest()[:10]}"
+
+# 启动时打印已加载 Token 的安全摘要（不泄露明文）
+print("[BOOT] loaded LYNN_API_TOKEN:", _mask(API_TOKEN))
 
 def require_auth(authorization: str | None):
-    """检查请求头里的 Bearer Token"""
     if API_TOKEN:
         if not authorization or not authorization.startswith("Bearer "):
             raise HTTPException(status_code=401, detail="Missing bearer token")
-        token = authorization.split(" ", 1)[1]  # 提取 Bearer 后面的部分
+        token = authorization.split(" ", 1)[1]
         if token != API_TOKEN:
             raise HTTPException(status_code=403, detail="Invalid token")
 
 @app.get("/health", tags=["meta"])
 def health():
-    return {"ok": True, "service": "lynn", "version": "0.0.1"}
+    return {"ok": True, "service": "Lynn", "version": "0.0.1"}
 
 @app.get("/meta", tags=["meta"])
 def meta(authorization: str | None = Header(default=None)):
     require_auth(authorization)
     return {"api": "lynn", "auth": "ok"}
 
-# 挂载静态目录，公开 /openapi.yaml
+# 调试：回显你带过来的 Authorization 头
+@app.get("/debug/echo-auth", tags=["debug"])
+def echo_auth(request: Request):
+    return {"authorization": request.headers.get("authorization")}
 
+# 公开 /openapi.yaml
 app.mount("/", StaticFiles(directory="public", html=False), name="public")
+
