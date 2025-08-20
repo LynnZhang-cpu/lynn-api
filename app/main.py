@@ -47,6 +47,97 @@ def debug_token():
 
 # 公开静态 openapi.yaml
 app.mount("/", StaticFiles(directory="public", html=False), name="public")
+# ========= SOAP 生成接口 =========
+from pydantic import BaseModel, Field
+from typing import List, Optional
+import os
+from openai import OpenAI
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+class SoapInput(BaseModel):
+    # 关键信息（可按需扩展/精简）
+    chiefComplaint: str = Field(..., description="主诉/来诊原因")
+    symptoms: List[str] = Field(default_factory=list, description="症状列表")
+    tongue: Optional[str] = Field(default=None, description="舌象（或描述）")
+    pulse: Optional[str] = Field(default=None, description="脉象")
+    history: Optional[str] = Field(default=None, description="病史/既往史/过敏史等")
+    objective: Optional[str] = Field(default=None, description="客观检查/舌图要点等")
+    assessmentHint: Optional[str] = Field(default=None, description="诊断思路提示（可空）")
+    totalGrams: Optional[int] = Field(default=110, description="默认总克数 110g")
+    weeks: Optional[int] = Field(default=1, description="给药周数，默认 1 周")
+    preferences: Optional[str] = Field(default=None, description="患者偏好/忌口/备考")
+
+class SoapOutput(BaseModel):
+    soapMarkdown: str
+    totalGrams: int
+
+def _build_soap_prompt(payload: SoapInput) -> str:
+    return f"""
+你是我的中医诊断与处方助手，需严格按照以下固定规则与结构输出内容。
+
+【适用输入】
+我会提供患者症状、舌象、脉象、病史和其它临床表现。
+若未说明用药周期与总克数，默认配方总克数为 {payload.totalGrams * max(1, payload.weeks)} 克（{payload.totalGrams}g/周 × {max(1, payload.weeks)} 周）。
+
+【输出结构与规则】
+① 症状与中医诊断表
+- 双列表格：左列=症状，右列=中医诊断与病机（精准术语）。
+
+② 核心治则
+- 用“×”分隔（≤7条），主症在前。
+
+③ 处方 + 功效说明
+- 按功能模块分组：
+  - **主症模块**（≥总方 60%）
+  - 兼症模块（如：补气、补血、祛湿、活血、安神……）
+- 每味药：药名 + 剂量（g），并简述作用。
+- 总克数严格≈{payload.totalGrams * max(1, payload.weeks)} g（不含生姜、红枣）。
+- 如滋腻药偏多，自动加健脾化湿药护胃；避免药性冲突；必要时标注先煎/后下/另包。
+
+④ 模块化横向处方表
+- 每行：**加粗模块标题** | 药名 克数 | 药名 克数 | …
+- 最后一行给出总克数（g），单位统一：g / 枚 / 片。
+
+【患者信息】
+- 主诉：{payload.chiefComplaint}
+- 症状：{", ".join(payload.symptoms) if payload.symptoms else "未补充"}
+- 舌象：{payload.tongue or "未述"}
+- 脉象：{payload.pulse or "未述"}
+- 病史/客观：{payload.history or "未述"}；{payload.objective or ""}
+- 偏好/注意：{payload.preferences or "未述"}
+- 诊断思路提示：{payload.assessmentHint or "无"}
+
+请直接输出以上 ①~④ 的完整内容（Markdown），不要额外解释。
+    """.strip()
+
+@app.post("/soap", response_model=SoapOutput, tags=["tcm"])
+def generate_soap(data: SoapInput, authorization: str | None = Header(default=None)):
+    # 复用鉴权
+    require_auth(authorization)
+
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=500, detail="Server OPENAI_API_KEY not set")
+
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    prompt = _build_soap_prompt(data)
+
+    try:
+        # 使用轻量便宜模型：gpt-4o-mini（仅文本）
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "你是一名资深中医临床医生，输出临床严谨、结构化结果。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.7,
+        )
+        content = completion.choices[0].message.content
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"OpenAI error: {e}")
+
+    return SoapOutput(soapMarkdown=content, totalGrams=(data.totalGrams or 110) * max(1, data.weeks or 1))
 
 
 
