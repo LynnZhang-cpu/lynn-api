@@ -1,38 +1,196 @@
 openapi: 3.1.0
 info:
-  title: Lynn Bootstrap API
-  description: 最小启动版：用于验证 ChatGPT Actions 能访问你的域名与鉴权。
-  version: 0.0.1
+  title: Lynn API
+  version: 0.0.4
+  description: TCM SOAP generation API. /health is public; /meta, /soap, /transcribe, /soap-from-audio require Bearer auth.
 servers:
   - url: https://api.mediairevive.com.au
+    description: Primary API
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    SoapInput:
+      type: object
+      additionalProperties: false
+      properties:
+        chiefComplaint: { type: string }
+        symptoms:
+          type: array
+          items: { type: string }
+        tongue: { type: [string, "null"] }
+        pulse: { type: [string, "null"] }
+        history: { type: [string, "null"] }
+        objective: { type: [string, "null"] }
+        assessmentHint: { type: [string, "null"] }
+        totalGrams:
+          type: integer
+          default: 110
+          minimum: 1
+        weeks:
+          type: integer
+          default: 1
+          minimum: 1
+        preferences: { type: [string, "null"] }
+      required:
+        - chiefComplaint
+    SoapOutput:
+      type: object
+      additionalProperties: false
+      properties:
+        soapMarkdown: { type: string }
+        totalGrams: { type: integer }
+    TranscribeOutput:
+      type: object
+      additionalProperties: false
+      properties:
+        text: { type: string }
+        language: { type: [string, "null"] }
+
 paths:
   /health:
     get:
       operationId: getHealth
-      summary: 健康检查（无需鉴权）
+      summary: Health check (no auth)
       responses:
-        '200':
-          description: 服务健康状态
+        "200":
+          description: OK
           content:
             application/json:
               schema:
                 type: object
+                additionalProperties: false
                 properties:
                   ok: { type: boolean }
                   service: { type: string }
                   version: { type: string }
+
   /meta:
     get:
       operationId: getMeta
-      summary: 元信息（需要 Bearer）
+      summary: Meta (requires Bearer)
+      security:
+        - bearerAuth: []
       responses:
-        '200':
-          description: Meta
+        "200":
+          description: OK
           content:
             application/json:
               schema:
                 type: object
+                additionalProperties: false
                 properties:
                   api: { type: string }
                   auth: { type: string }
-components: {}
+        "401": { description: Missing or bad Authorization header }
+        "403": { description: Invalid token }
+
+  /soap:
+    post:
+      operationId: generateSoap
+      summary: Generate TCM SOAP and prescription (Markdown)
+      description: Generate structured SOAP and modular prescription based on clinical inputs.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SoapInput'
+      responses:
+        "200":
+          description: Generated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SoapOutput'
+        "401": { description: Missing or bad Authorization header }
+        "403": { description: Invalid token }
+        "502": { description: Upstream model error }
+
+  /transcribe:
+    post:
+      operationId: transcribeAudio
+      tags: [audio]
+      summary: Transcribe audio to text (Whisper)
+      description: Upload an audio file; server calls Whisper to return plain text.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Audio file (m4a/mp3/wav/webm)
+                language:
+                  type: [string, "null"]
+                  description: Optional BCP-47 code (e.g., zh, en)
+                prompt:
+                  type: [string, "null"]
+                  description: Optional hint for Whisper
+              required: [file]
+      responses:
+        "200":
+          description: Transcribed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TranscribeOutput'
+        "400": { description: Bad request (no file) }
+        "401": { description: Missing or bad Authorization header }
+        "403": { description: Invalid token }
+        "502": { description: Transcription error }
+
+  /soap-from-audio:
+    post:
+      operationId: generateSoapFromAudio
+      tags: [audio]
+      summary: One-shot audio → transcript → SOAP
+      description: Upload audio and get final SOAP (Markdown). Server first transcribes with Whisper, then generates SOAP.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Audio file (m4a/mp3/wav/webm)
+                totalGrams:
+                  type: integer
+                  default: 110
+                weeks:
+                  type: integer
+                  default: 1
+                assessmentHint:
+                  type: [string, "null"]
+                preferences:
+                  type: [string, "null"]
+              required: [file]
+      responses:
+        "200":
+          description: Generated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SoapOutput'
+        "400": { description: Bad request (no file) }
+        "401": { description: Missing or bad Authorization header }
+        "403": { description: Invalid token }
+        "502": { description: Upstream model error }
