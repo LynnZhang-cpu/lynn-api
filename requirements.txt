@@ -7,3 +7,5 @@ pydantic>=2.6.0
 
 openai>=1.40.0
 pydantic>=2.6.0
+
+python-multipart>=0.0.9
