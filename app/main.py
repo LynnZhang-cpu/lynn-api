@@ -9,14 +9,39 @@ app = FastAPI(title="Lynn API", version="0.0.2")
 # --------- 简单鉴权 ----------
 API_TOKEN = os.getenv("LYNN_API_TOKEN")
 
-def require_auth(authorization: str = Header(None)):
-    if not API_TOKEN:   # 未设置 token 时不校验，便于本地调试
+def # 新增/调整 import
+from fastapi import FastAPI, HTTPException, Depends, Header, Security
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.staticfiles import StaticFiles
+import os
+
+app = FastAPI(title="Lynn API", version="0.0.2")
+
+# 从环境变量读取 Token
+API_TOKEN = os.getenv("LYNN_API_TOKEN")
+
+# ✅ 声明 Bearer 安全方案（Swagger 会据此显示 Authorize 按钮）
+bearer_scheme = HTTPBearer(auto_error=False)
+
+def require_auth(
+    credentials: HTTPAuthorizationCredentials = Security(bearer_scheme)
+):
+    """
+    统一校验请求头 Authorization: Bearer <token>
+    并与环境变量 LYNN_API_TOKEN 对比。
+    """
+    if not API_TOKEN:
+        # 未配置服务端 Token，直接放行（或按需改为 500）
         return
-    if not authorization or not authorization.startswith("Bearer "):
+
+    # credentials 可能为 None（未携带 Authorization）
+    token = credentials.credentials if credentials else None
+    if not token:
         raise HTTPException(status_code=401, detail="Missing bearer token")
-    token = authorization.split(" ", 1)[1]
+
     if token != API_TOKEN:
         raise HTTPException(status_code=403, detail="Invalid token")
+
 
 # --------- 调试：列出所有已注册路由 ----------
 @app.get("/__routes", tags=["debug"])
