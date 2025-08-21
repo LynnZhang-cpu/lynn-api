@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>Lynn 录音转写 & SOAP</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Arial, sans-serif; margin: 24px; }
+    .row { margin-bottom: 14px; }
+    label { display: inline-block; min-width: 120px; }
+    input[type="text"], input[type="number"], textarea { width: 100%; max-width: 860px; padding: 8px; }
+    button { padding: 10px 16px; margin-right: 10px; }
+    .timer { font-size: 14px; color: #666; margin-left: 8px; }
+    .log { white-space: pre-wrap; background: #f6f8fa; padding: 10px; border-radius: 6px; }
+    .ok { color: #0a7f22; }
+    .err { color: #b00020; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, "Courier New", monospace; }
+  </style>
+</head>
+<body>
+  <h2>Lynn 录音转写 & SOAP</h2>
+
+  <div class="row">
+    <label>后端地址</label>
+    <input id="apiBase" type="text" value="https://api.mediairevive.com.au" />
+  </div>
+
+  <div class="row">
+    <label>Bearer Token</label>
+    <input id="token" type="text" placeholder="粘贴 LYNN_API_TOKEN（仅保存在本地）" />
+  </div>
+
+  <div class="row">
+    <label>总克数 / 周数</label>
+    <div>
+      <input id="totalGrams" type="number" value="110" min="1" style="width:120px" />
+      <input id="weeks" type="number" value="1" min="1" style="width:120px;margin-left:10px;" />
+    </div>
+  </div>
+
+  <div class="row">
+    <label>诊断提示（可选）</label>
+    <input id="assessmentHint" type="text" placeholder="例：肝郁化火、痰湿内蕴，清肝化痰、理气和中" />
+  </div>
+
+  <div class="row">
+    <label>患者偏好（可选）</label>
+    <input id="preferences" type="text" placeholder="例：不喜太寒凉" />
+  </div>
+
+  <div class="row">
+    <button id="startBtn">▶ 开始录音（空格）</button>
+    <button id="stopBtn" disabled>■ 结束录音（空格）</button>
+    <span class="timer" id="timer">00:00</span>
+  </div>
+
+  <div class="row">
+    <label>日志</label>
+    <div id="log" class="log mono">就绪。</div>
+  </div>
+
+  <div class="row">
+    <label>SOAP（Markdown）</label>
+    <textarea id="soap" rows="18" placeholder="生成结果会出现在这里"></textarea>
+  </div>
+
+<script>
+(function(){
+  const apiBaseEl = document.getElementById('apiBase');
+  const tokenEl = document.getElementById('token');
+  const gramsEl = document.getElementById('totalGrams');
+  const weeksEl = document.getElementById('weeks');
+  const hintEl = document.getElementById('assessmentHint');
+  const prefEl = document.getElementById('preferences');
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn  = document.getElementById('stopBtn');
+  const timerEl  = document.getElementById('timer');
+  const logEl    = document.getElementById('log');
+  const soapEl   = document.getElementById('soap');
+
+  tokenEl.value   = localStorage.getItem('lynn_token') || '';
+  apiBaseEl.value = localStorage.getItem('lynn_apiBase') || apiBaseEl.value;
+  gramsEl.value   = localStorage.getItem('lynn_grams') || gramsEl.value;
+  weeksEl.value   = localStorage.getItem('lynn_weeks') || weeksEl.value;
+
+  [tokenEl, apiBaseEl, gramsEl, weeksEl].forEach(el=>{
+    el.addEventListener('change', ()=>{
+      localStorage.setItem('lynn_token', tokenEl.value.trim());
+      localStorage.setItem('lynn_apiBase', apiBaseEl.value.trim());
+      localStorage.setItem('lynn_grams', gramsEl.value);
+      localStorage.setItem('lynn_weeks', weeksEl.value);
+    });
+  });
+
+  let mediaRecorder;
+  let chunks = [];
+  let startTs = 0;
+  let timerId;
+
+  function log(msg, cls="") {
+    logEl.innerHTML = `<span class="\${cls}">\${msg}</span>`;
+  }
+  function sec2mmss(sec) {
+    const m = String(Math.floor(sec/60)).padStart(2,'0');
+    const s = String(sec%60).padStart(2,'0');
+    return `${m}:${s}`;
+  }
+
+  async function startRec() {
+    const token = tokenEl.value.trim();
+    if (!token) return log("请先粘贴 Bearer Token", "err");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      chunks = [];
+      mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+      mediaRecorder.ondataavailable = e => { if (e.data.size>0) chunks.push(e.data); };
+      mediaRecorder.onstop = onStop;
+      mediaRecorder.start();
+
+      startTs = Date.now();
+      timerEl.textContent = "00:00";
+      clearInterval(timerId);
+      timerId = setInterval(()=>{
+        timerEl.textContent = sec2mmss(Math.floor((Date.now()-startTs)/1000));
+      }, 1000);
+
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      log("录音中… 点击“结束录音”或按空格停止。", "ok");
+    } catch (e) {
+      console.error(e);
+      log("无法打开麦克风：" + e, "err");
+    }
+  }
+
+  async function onStop() {
+    clearInterval(timerId);
+    stopBtn.disabled = true;
+    startBtn.disabled = false;
+
+    const blob = new Blob(chunks, { type: 'audio/webm' });
+    const file = new File([blob], `consult_\${Date.now()}.webm`, { type: 'audio/webm' });
+
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('totalGrams', gramsEl.value || '110');
+    fd.append('weeks', weeksEl.value || '1');
+    if (hintEl.value.trim()) fd.append('assessmentHint', hintEl.value.trim());
+    if (prefEl.value.trim()) fd.append('preferences', prefEl.value.trim());
+
+    log("上传处理中…");
+
+    const apiBase = apiBaseEl.value.replace(/\/+$/,'');
+    try {
+      const res = await fetch(`${apiBase}/soap-from-audio`, {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + tokenEl.value.trim() },
+        body: fd
+      });
+      if (!res.ok) {
+        const t = await res.text();
+        log(`服务器返回 \${res.status}: \${t}`, "err");
+        return;
+      }
+      const data = await res.json();
+      soapEl.value = data.soapMarkdown || '';
+      log("✅ 已生成 SOAP（Markdown）。", "ok");
+    } catch (e) {
+      console.error(e);
+      log("网络或服务器错误：" + e, "err");
+    }
+  }
+
+  function stopRec() {
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+      mediaRecorder.stop();
+    }
+  }
+
+  startBtn.addEventListener('click', startRec);
+  stopBtn.addEventListener('click', stopRec);
+  window.addEventListener('keydown', (e)=>{
+    if (e.code === 'Space') {
+      e.preventDefault();
+      if (!startBtn.disabled) startRec();
+      else if (!stopBtn.disabled) stopRec();
+    }
+  });
+})();
+</script>
+</body>
+</html>
