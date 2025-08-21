@@ -1,6 +1,10 @@
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 import os, hashlib
+import os
+from fastapi import Header, HTTPException, UploadFile, File
+from pydantic import BaseModel
+from openai import OpenAI
 
 app = FastAPI(title="Lynn Minimal", version="0.0.2")
 
@@ -54,6 +58,16 @@ import os
 from openai import OpenAI
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+class SoapOutput(BaseModel):
+    soapMarkdown: str
+    totalGrams: int
+
+class TranscribeOutput(BaseModel):
+    text: str
+    language: str | None = None
+
 
 class SoapInput(BaseModel):
     # 关键信息（可按需扩展/精简）
@@ -232,6 +246,244 @@ def generate_soap(data: SoapInput, authorization: str | None = Header(default=No
 
     total = (data.totalGrams or 110) * max(1, data.weeks or 1)
     return SoapOutput(soapMarkdown=content, totalGrams=total)
+from fastapi import UploadFile, File
+
+# 结构同你已有的 SoapOutput
+class TranscribeOutput(BaseModel):
+    text: str
+    language: str | None = None
+
+@app.post("/transcribe", response_model=TranscribeOutput, tags=["audio"])
+def transcribe_audio(
+    authorization: str | None = Header(default=None),
+    file: UploadFile = File(...),
+    language: str | None = None,
+    prompt: str | None = None,
+):
+    require_auth(authorization)
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=500, detail="Server OPENAI_API_KEY not set")
+
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    try:
+        # Whisper-1
+        result = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=file.file,  # FastAPI UploadFile 的类文件对象
+            language=language,
+            prompt=prompt
+        )
+        # openai>=1.x 返回对象字段名为 .text（按官方SDK）
+        return TranscribeOutput(text=result.text or "", language=language)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Transcription error: {e}")
+
+@app.post("/soap-from-audio", response_model=SoapOutput, tags=["audio"])
+def soap_from_audio(
+    authorization: str | None = Header(default=None),
+    file: UploadFile = File(...),
+    totalGrams: int = 110,
+    weeks: int = 1,
+    assessmentHint: str | None = None,
+    preferences: str | None = None,
+):
+    require_auth(authorization)
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=500, detail="Server OPENAI_API_KEY not set")
+
+    # 1) 先转写
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    try:
+        t = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=file.file,
+            language="zh"
+        )
+        transcript = t.text or ""
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Transcription error: {e}")
+
+    # 2) 再生成 SOAP（把整段转写当作主诉/症状综合，由模型抽取结构）
+    prompt = f"""
+你是资深中医师。以下是完整转写的问诊记录，请抽取关键信息并输出标准化 SOAP（Markdown）与分模块处方，遵守我方固定结构与总克数：
+- 转写原文：{transcript}
+- 诊断思路提示：{assessmentHint or "无"}
+- 患者偏好：{preferences or "无"}
+- 每周总克数：{totalGrams}g，疗程：{weeks}周
+严格执行我方既定的 ①症状与中医诊断表 ②核心治则 ③处方 + 功效说明 ④模块化横向处方表 的格式与约束。
+    """.strip()
+
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "你是一名临床严谨的中医医生，输出可直接入病历的内容。"},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+        )
+        md = completion.choices[0].message.content
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"OpenAI error: {e}")
+
+    return SoapOutput(soapMarkdown=md, totalGrams=(totalGrams * max(1, weeks)))
+from fastapi import UploadFile, File
+from pydantic import BaseModel
+from openai import OpenAI
+import os
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+class SoapOutput(BaseModel):
+    soapMarkdown: str
+    totalGrams: int
+
+class TranscribeOutput(BaseModel):
+    text: str
+    language: str | None = None
+
+@app.post("/transcribe", response_model=TranscribeOutput, tags=["audio"])
+def transcribe_audio(
+    authorization: str | None = Header(default=None),
+    file: UploadFile = File(...),
+    language: str | None = None,
+    prompt: str | None = None,
+):
+    require_auth(authorization)
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=500, detail="Server OPENAI_API_KEY not set")
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    try:
+        res = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=file.file,
+            language=language,
+            prompt=prompt
+        )
+        return TranscribeOutput(text=res.text or "", language=language)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Transcription error: {e}")
+
+@app.post("/soap-from-audio", response_model=SoapOutput, tags=["audio"])
+def soap_from_audio(
+    authorization: str | None = Header(default=None),
+    file: UploadFile = File(...),
+    totalGrams: int = 110,
+    weeks: int = 1,
+    assessmentHint: str | None = None,
+    preferences: str | None = None,
+):
+    require_auth(authorization)
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=500, detail="Server OPENAI_API_KEY not set")
+
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    try:
+        t = client.audio.transcriptions.create(model="whisper-1", file=file.file, language="zh")
+        transcript = t.text or ""
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Transcription error: {e}")
+
+    user_prompt = f"""
+请将这段完整的问诊转写整理为标准化中医 SOAP 与处方（Markdown）：
+- 转写原文：{transcript}
+- 诊断思路提示：{assessmentHint or "无"}
+- 患者偏好：{preferences or "无"}
+- 每周总克数：{totalGrams}g，疗程：{weeks}周
+严格执行我方既定格式：①症状与中医诊断表 ②核心治则 ③处方+功效说明 ④模块化横向处方表。
+    """.strip()
+
+    try:
+        comp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "你是一名临床严谨的中医医生，输出可直接入病历。"},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.7,
+        )
+        md = comp.choices[0].message.content
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"OpenAI error: {e}")
+
+    return SoapOutput(soapMarkdown=md, totalGrams=totalGrams * max(1, weeks))
+@app.post("/transcribe", response_model=TranscribeOutput, tags=["audio"])
+def transcribe_audio(
+    authorization: str | None = Header(default=None),
+    file: UploadFile = File(...),
+    language: str | None = None,
+    prompt: str | None = None,
+):
+    require_auth(authorization)
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=500, detail="Server OPENAI_API_KEY not set")
+
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    try:
+        res = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=file.file,         # FastAPI UploadFile 的类文件对象
+            language=language,
+            prompt=prompt,
+        )
+        return TranscribeOutput(text=res.text or "", language=language)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Transcription error: {e}")
+
+@app.post("/soap-from-audio", response_model=SoapOutput, tags=["audio"])
+def soap_from_audio(
+    authorization: str | None = Header(default=None),
+    file: UploadFile = File(...),
+    totalGrams: int = 110,
+    weeks: int = 1,
+    assessmentHint: str | None = None,
+    preferences: str | None = None,
+):
+    require_auth(authorization)
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=500, detail="Server OPENAI_API_KEY not set")
+
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    # 1) Whisper 转写
+    try:
+        t = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=file.file,
+            language="zh"   # 也可不指定，让模型自动识别
+        )
+        transcript = t.text or ""
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Transcription error: {e}")
+
+    # 2) 生成 SOAP（把整段转写交给模型抽取结构并按你固定模板输出）
+    user_prompt = f"""
+请将这段完整的问诊转写整理为标准化中医 SOAP 与处方（Markdown）：
+- 转写原文：{transcript}
+- 诊断思路提示：{assessmentHint or "无"}
+- 患者偏好：{preferences or "无"}
+- 每周总克数：{totalGrams}g，疗程：{weeks}周
+严格执行我方既定格式：①症状与中医诊断表 ②核心治则 ③处方+功效说明 ④模块化横向处方表。
+    """.strip()
+
+    try:
+        comp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "你是一名临床严谨的中医医生，输出可直接入病历。"},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.7,
+        )
+        md = comp.choices[0].message.content
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"OpenAI error: {e}")
+
+    return SoapOutput(soapMarkdown=md, totalGrams=totalGrams * max(1, weeks))
+# 挂载静态目录，公开 /openapi.yaml 与 /recorder.html
+app.mount("/", StaticFiles(directory="public", html=False), name="public")
+
+
 app.mount("/", StaticFiles(directory="public", html=False), name="public")
 
 
