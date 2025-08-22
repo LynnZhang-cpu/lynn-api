@@ -179,5 +179,50 @@ async def soap_from_audio(
 ):
     # 你的业务逻辑
     return {"ok": True, "file_name": file.filename}
+# app/main.py
+import os
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Query
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.staticfiles import StaticFiles
+
+app = FastAPI(title="Lynn API", version="0.0.2")
+
+# （如果你有静态文件，比如 recorder.html/openapi.yml）
+app.mount("/", StaticFiles(directory="public", html=True), name="public")
+
+# ========= 新：用标准 HTTP Bearer =========
+security = HTTPBearer()
+LYNN_TOKEN = os.getenv("LYNN_API_TOKEN", "abc123XYZ789")  # 环境变量优先，没设就用这个
+
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = credentials.credentials
+    if token != LYNN_TOKEN:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    return token
+
+# ========= 示例路由（把原来写 Header 的地方改成下面这样）=========
+@app.get("/health", tags=["meta"])
+def health():
+    return {"ok": True, "service": "Lynn", "version": "0.0.2"}
+
+@app.get("/meta", tags=["meta"])
+def meta(token: str = Depends(verify_token)):
+    return {"api": "lynn", "auth": "ok"}
+
+@app.post("/transcribe", tags=["audio"])
+async def transcribe(file: UploadFile = File(...), token: str = Depends(verify_token)):
+    data = await file.read()
+    return {"ok": True, "fileName": file.filename, "size": len(data)}
+
+@app.post("/soap-from-audio", tags=["audio"])
+async def soap_from_audio(
+    totalGrams: int = Query(110, ge=1),
+    weeks: int = Query(1, ge=1),
+    file: UploadFile = File(...),
+    token: str = Depends(verify_token),
+):
+    data = await file.read()
+    return {"ok": True, "fileName": file.filename, "size": len(data),
+            "totalGrams": totalGrams, "weeks": weeks}
 
 
