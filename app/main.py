@@ -128,3 +128,27 @@ async def soap_from_audio(
 
 # --------- 静态资源：不要挂在 "/" ----------
 app.mount("/public", StaticFiles(directory="public", html=False), name="public")
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
+security = HTTPBearer()
+
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = credentials.credentials
+    if token != "abc123XYZ789":  # 这里替换成你的真实 token
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing token"
+        )
+    return token
+
+@app.post("/soap-from-audio")
+async def soap_from_audio(
+    totalGrams: int,
+    weeks: int,
+    file: UploadFile = File(...),
+    token: str = Depends(verify_token)
+):
+    # 你的业务逻辑
+    return {"ok": True}
+
