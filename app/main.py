@@ -1,37 +1,17 @@
 from __future__ import annotations
-import os, secrets
-from pathlib import Path
-from typing import Optional
+import os, secrets, asyncio, tempfile, uuid, datetime
+from typing import Optional, Dict, List
 
-from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 
-# 兼容两种环境变量名
 API_TOKEN = (os.getenv("LYNN_API_TOKEN") or os.getenv("API_TOKEN") or "").strip()
-
-# ---------- FastAPI 实例（名字必须叫 app） ----------
-app = FastAPI(
-    title="诊所智能语音助手 API",
-    description="Whisper 转写 + 生成 SOAP 的工作流接口",
-    version="1.0.0",
-)
-
-# CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ---------- 鉴权 ----------
 bearer_scheme = HTTPBearer(auto_error=False)
-
 def auth(creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme)):
-    if not API_TOKEN:  # 未设置 token 时放行（开发期）
+    if not API_TOKEN:
         return
     if creds is None or creds.scheme.lower() != "bearer":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authenticated")
@@ -39,58 +19,138 @@ def auth(creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme))
     if not secrets.compare_digest(client_token, API_TOKEN):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
-# ---------- 模型 ----------
-class SoapRequest(BaseModel):
-    text: str
+from openai import OpenAI
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or ""
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-class SoapResponse(BaseModel):
-    subjective: str
-    objective: str
-    assessment: str
-    plan: str
+app = FastAPI(
+    title="诊疗分身 · 实时问诊工作流",
+    version="1.3.0",
+    description="开始问诊 → 实时转写（SSE）→ 结束问诊（返回完整逐字稿）。SOAP 由前端智能体处理。",
+)
 
-class TranscribeResponse(BaseModel):
-    transcription: str
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# ---------- 简单 SOAP 生成占位 ----------
-def generate_soap(text: str) -> SoapResponse:
-    subj = text[:200] if text else "（空）"
-    return SoapResponse(
-        subjective=f"主诉：{subj}",
-        objective="客观：生命体征平稳。",
-        assessment="评估：外感风热（示例）。",
-        plan="计划：宣肺清热；银翘散；针刺合谷、曲池、外关（示例）。"
-    )
+class LiveSession:
+    def __init__(self):
+        self.intake_id: str = str(uuid.uuid4())
+        self.started_at: str = datetime.datetime.utcnow().isoformat() + "Z"
+        self.tmpfile = tempfile.NamedTemporaryFile(delete=False, suffix=".webm")
+        self.filepath = self.tmpfile.name
+        self.stopped: bool = False
+        self.sse_queues: List[asyncio.Queue[str]] = []
+        self.last_text: str = ""
+        self.transcribe_task: Optional[asyncio.Task] = None
+        self._lock = asyncio.Lock()
 
-# ---------- 路由 ----------
+    async def broadcast(self, event: str, payload: dict):
+        line = "event: " + event + "\n" + "data: " + JSONResponse(content=payload).body.decode("utf-8") + "\n\n"
+        for q in list(self.sse_queues):
+            try:
+                await q.put(line)
+            except asyncio.CancelledError:
+                pass
+
+SESSIONS: Dict[str, LiveSession] = {}
+
+class LiveStartResponse(BaseModel):
+    intakeId: str
+    startedAt: str
+
+class LiveStopRequest(BaseModel):
+    intakeId: str
+
+class LiveStopResponse(BaseModel):
+    intakeId: str
+    transcript: str
+
+def transcribe_file_sync(path: str) -> str:
+    with open(path, "rb") as f:
+        resp = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=f,
+        )
+    return getattr(resp, "text", "") or ""
+
+async def transcribe_file(path: str) -> str:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, transcribe_file_sync, path)
+
+async def transcribe_loop(session: LiveSession):
+    try:
+        while not session.stopped:
+            await asyncio.sleep(3)
+            txt = await transcribe_file(session.filepath)
+            if txt and txt != session.last_text:
+                session.last_text = txt
+                await session.broadcast("partial", {"intakeId": session.intake_id, "text": txt})
+        final_txt = await transcribe_file(session.filepath)
+        if final_txt:
+            session.last_text = final_txt
+        await session.broadcast("final", {"intakeId": session.intake_id, "text": session.last_text})
+    except Exception as e:
+        await session.broadcast("error", {"intakeId": session.intake_id, "message": str(e)})
+
 @app.get("/health", tags=["meta"])
 def health():
-    return {"ok": True, "service": "Lynn", "version": "0.0.2"}
+    return {"ok": True, "service": "Lynn live", "version": "1.3.0"}
 
-@app.get("/meta", tags=["meta"], dependencies=[Depends(auth)])
-def meta():
-    return {"service": "clinic-voice-assistant", "version": "1.0.0"}
+@app.post("/live/start", tags=["live"], response_model=LiveStartResponse, dependencies=[Depends(auth)])
+async def start_live():
+    session = LiveSession()
+    SESSIONS[session.intake_id] = session
+    session.transcribe_task = asyncio.create_task(transcribe_loop(session))
+    return LiveStartResponse(intakeId=session.intake_id, startedAt=session.started_at)
 
-@app.post("/transcribe", tags=["audio"], response_model=TranscribeResponse, dependencies=[Depends(auth)])
-async def transcribe(file: UploadFile = File(...)):
-    text = f"(占位转写) 收到文件：{file.filename}"
-    return TranscribeResponse(transcription=text)
+@app.get("/live/events", tags=["live"], dependencies=[Depends(auth)])
+async def sse_events(intakeId: str):
+    if intakeId not in SESSIONS:
+        raise HTTPException(404, "intakeId not found")
+    session = SESSIONS[intakeId]
+    q: asyncio.Queue[str] = asyncio.Queue()
+    session.sse_queues.append(q)
 
-@app.post("/soap-from-audio", tags=["audio"], response_model=SoapResponse, dependencies=[Depends(auth)])
-async def soap_from_audio(file: UploadFile = File(...)):
-    text = f"(占位转写) 收到文件：{file.filename}"
-    return generate_soap(text)
+    async def gen():
+        try:
+            await q.put(f"event: ready\ndata: {{\"intakeId\":\"{intakeId}\"}}\n\n")
+            while True:
+                data = await q.get()
+                yield data
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if q in session.sse_queues:
+                session.sse_queues.remove(q)
 
-@app.post("/soap", tags=["tcm"], response_model=SoapResponse, dependencies=[Depends(auth)])
-def soap_from_text(body: SoapRequest):
-    return generate_soap(body.text)
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
-# 提供 public/openapi.yaml（可选）
-ROOT_DIR = Path(__file__).resolve().parents[1]
-OPENAPI_YAML_PATH = ROOT_DIR / "public" / "openapi.yaml"
+@app.post("/live/audio", tags=["live"], status_code=204, dependencies=[Depends(auth)])
+async def upload_live_audio(intakeId: str, request: Request, format: Optional[str] = None):
+    if intakeId not in SESSIONS:
+        raise HTTPException(404, "intakeId not found")
+    session = SESSIONS[intakeId]
+    async with session._lock:
+        with open(session.filepath, "ab") as w:
+            async for chunk in request.stream():
+                if not chunk:
+                    break
+                w.write(chunk)
+    return Response(status_code=204)
 
-@app.get("/openapi.yaml", include_in_schema=False)
-def serve_openapi_yaml():
-    if OPENAPI_YAML_PATH.exists():
-        return FileResponse(str(OPENAPI_YAML_PATH), media_type="text/yaml")
-    raise HTTPException(status_code=404, detail=f"openapi.yaml not found at {OPENAPI_YAML_PATH}")
+@app.post("/live/stop", tags=["live"], response_model=LiveStopResponse, dependencies=[Depends(auth)])
+async def stop_live(body: LiveStopRequest):
+    if body.intakeId not in SESSIONS:
+        raise HTTPException(404, "intakeId not found")
+    session = SESSIONS[body.intakeId]
+    session.stopped = True
+    if session.transcribe_task:
+        try:
+            await asyncio.wait_for(session.transcribe_task, timeout=120)
+        except asyncio.TimeoutError:
+            pass
+    return LiveStopResponse(intakeId=session.intake_id, transcript=session.last_text)
