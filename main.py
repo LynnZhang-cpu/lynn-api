@@ -1,7 +1,7 @@
-from fastapi import FastAPI
-from fastapi.responses import PlainTextResponse
+from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
-import os, asyncio
+import os, asyncio, io
 from dotenv import load_dotenv
 from datetime import datetime
 
@@ -100,7 +100,6 @@ async def debug():
         "logExists": os.path.exists(LOG_PATH),
     }
 
-# 测试喂入日志（ready/partial/final）
 @app.get("/emit")
 async def emit(kind: str = "final", text: str = ""):
     if kind == "ready":
@@ -115,3 +114,74 @@ async def emit(kind: str = "final", text: str = ""):
         f.write(line + "\n")
     return {"ok": True, "wrote": line}
 
+# 麦克风网页（2秒分段录音 -> /stt -> 写入日志）
+html_mic = """
+<!doctype html><html><head><meta charset="utf-8">
+<title>语音转写</title><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;padding:16px;background:#0b1020;color:#e6e9ef}
+h1{margin:0 0 12px;font-size:18px}
+#log{white-space:pre-wrap;background:#0f172a;border-radius:12px;padding:12px;line-height:1.5;min-height:40vh;border:1px solid #223}
+button{padding:10px 16px;border-radius:10px;border:0;margin-right:8px;cursor:pointer}
+#start{background:#22c55e;color:#111}#stop{background:#ef4444;color:#fff}
+</style></head><body>
+<h1>实时语音转写</h1>
+<div style="margin-bottom:10px;">
+<button id="start">开始</button><button id="stop" disabled>停止</button>
+</div>
+<div id="log"></div>
+<script>
+let rec, timer=null;
+const log=document.getElementById('log');
+const startBtn=document.getElementById('start');
+const stopBtn=document.getElementById('stop');
+
+function append(t){log.textContent += t + "\\n"; log.scrollTop=log.scrollHeight;}
+
+async function startRec(){
+  const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+  rec = new MediaRecorder(stream, {mimeType: 'audio/webm;codecs=opus'});
+  rec.ondataavailable = async (e)=>{
+    if(e.data && e.data.size>0){
+      const fd = new FormData();
+      fd.append('file', e.data, 'chunk.webm');
+      try{
+        const r = await fetch('/stt', {method:'POST', body: fd});
+        const text = await r.text();
+        if(text && text.trim()) append(text.trim());
+      }catch(err){console.error(err);}
+    }
+  };
+  rec.start(2000);
+  startBtn.disabled=true; stopBtn.disabled=false;
+}
+function stopRec(){
+  if(rec && rec.state!=='inactive'){rec.stop();}
+  startBtn.disabled=false; stopBtn.disabled=true;
+}
+startBtn.onclick=startRec; stopBtn.onclick=stopRec;
+</script></body></html>
+"""
+
+@app.get("/mic", response_class=HTMLResponse)
+async def mic():
+    return HTMLResponse(html_mic)
+
+@app.post("/stt", response_class=PlainTextResponse)
+async def stt(file: UploadFile = File(...)):
+    from openai import OpenAI
+    client = OpenAI()
+    data = await file.read()
+    bio = io.BytesIO(data)
+    try:
+        resp = client.audio.transcriptions.create(
+            model="gpt-4o-mini-transcribe",  # 或 "whisper-1"
+            file=("chunk.webm", bio, file.content_type or "audio/webm")
+        )
+        text = (resp.text or "").strip()
+    except Exception as e:
+        text = ""
+    if text:
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"final: {text}\n")
+    return text
