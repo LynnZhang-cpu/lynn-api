@@ -1,6 +1,5 @@
-cat > main.py << 'PY'
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, StreamingResponse, PlainTextResponse
+from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 import os, asyncio
 from dotenv import load_dotenv
@@ -9,110 +8,103 @@ from datetime import datetime
 load_dotenv()
 app = FastAPI()
 app.add_middleware(
-CORSMiddleware,
-allow_origins=[""],
-allow_credentials=True,
-allow_methods=[""],
-allow_headers=["*"],
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 LOG_PATH = os.path.expanduser(os.getenv("LOG_PATH", "/tmp/sse.log"))
+
 transcript_buffer = []
 _last_final = ""
 _last_line = ""
 _last_time = ""
-broadcast_queue: asyncio.Queue[str] = asyncio.Queue()
+queue: asyncio.Queue[str] = asyncio.Queue()
 
 def _extract_final_text(line: str):
-s = line.strip()
-if "final" not in s:
-return None
-i = s.find("final")
-rest = s[i+5:]
-rest = rest.lstrip(" :\t")
-rest = rest.split("#", 1)[0]
-rest = rest.strip()
-return rest or None
+    s = line.strip()
+    if "final" not in s:
+        return None
+    i = s.find("final")
+    rest = s[i+5:]
+    rest = rest.lstrip(" :\t")
+    rest = rest.split("#", 1)[0]
+    rest = rest.strip()
+    return rest or None
 
 async def _watch_log():
-global _last_final, _last_line, _last_time
-while not os.path.exists(LOG_PATH):
-await asyncio.sleep(0.3)
-with open(LOG_PATH, "r", encoding="utf-8", errors="ignore") as f:
-f.seek(0, os.SEEK_END)
-while True:
-line = f.readline()
-if not line:
-await asyncio.sleep(0.2)
-continue
-_last_line = line.rstrip()
-_last_time = datetime.now().strftime("%H:%M:%S")
-await broadcast_queue.put(_last_line)
-txt = _extract_final_text(line)
-if txt and txt != _last_final:
-transcript_buffer.append(txt)
-_last_final = txt
+    global _last_final, _last_line, _last_time
+    # 等待日志文件出现
+    while not os.path.exists(LOG_PATH):
+        await asyncio.sleep(0.3)
+    with open(LOG_PATH, "r", encoding="utf-8", errors="ignore") as f:
+        f.seek(0, os.SEEK_END)
+        while True:
+            line = f.readline()
+            if not line:
+                await asyncio.sleep(0.2)
+                continue
+            _last_line = line.rstrip()
+            _last_time = datetime.now().strftime("%H:%M:%S")
+            txt = _extract_final_text(line)
+            if txt and txt != _last_final:
+                transcript_buffer.append(txt)
+                _last_final = txt
 
 @app.on_event("startup")
 async def _startup():
-asyncio.create_task(_watch_log())
+    asyncio.create_task(_watch_log())
 
 @app.get("/start")
 async def start():
-global _last_final
-transcript_buffer.clear()
-_last_final = ""
-return {"status": "listening", "message": "问诊已开始，缓冲区已清空"}
+    global _last_final
+    transcript_buffer.clear()
+    _last_final = ""
+    return {"status": "listening", "message": "问诊已开始，缓冲区已清空"}
 
 @app.get("/latest", response_class=PlainTextResponse)
 async def latest():
-return "\n".join(transcript_buffer)
+    return "\n".join(transcript_buffer)
 
 @app.get("/end", response_class=PlainTextResponse)
 async def end():
-global _last_final
-text = "\n".join(transcript_buffer)
-transcript_buffer.clear()
-_last_final = ""
-return text
+    global _last_final
+    text = "\n".join(transcript_buffer)
+    transcript_buffer.clear()
+    _last_final = ""
+    return text
 
 @app.get("/rebuild", response_class=PlainTextResponse)
 async def rebuild():
-global _last_final
-transcript_buffer.clear()
-_last_final = ""
-if not os.path.exists(LOG_PATH):
-return ""
-with open(LOG_PATH, "r", encoding="utf-8", errors="ignore") as f:
-for line in f:
-txt = _extract_final_text(line)
-if txt and txt != _last_final:
-transcript_buffer.append(txt)
-_last_final = txt
-return "\n".join(transcript_buffer)
+    global _last_final
+    transcript_buffer.clear()
+    _last_final = ""
+    if not os.path.exists(LOG_PATH):
+        return ""
+    with open(LOG_PATH, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            txt = _extract_final_text(line)
+            if txt and txt != _last_final:
+                transcript_buffer.append(txt)
+                _last_final = txt
+    return "\n".join(transcript_buffer)
 
 @app.get("/debug")
 async def debug():
-return {
-"logPath": LOG_PATH,
-"bufferLen": len(transcript_buffer),
-"lastFinal": _last_final,
-"lastLine": _last_line,
-"lastTime": _last_time,
-"logExists": os.path.exists(LOG_PATH),
-}
+    return {
+        "logPath": LOG_PATH,
+        "bufferLen": len(transcript_buffer),
+        "lastFinal": _last_final,
+        "lastLine": _last_line,
+        "lastTime": _last_time,
+        "logExists": os.path.exists(LOG_PATH),
+    }
 
-@app.get("/stream")
-async def stream():
-async def gen():
-while True:
-line = await broadcast_queue.get()
-yield f"data: {line}\n\n"
-return StreamingResponse(gen(), media_type="text/event-stream")
-PY
+# 测试用：直接写一行到日志
 @app.get("/emit")
 async def emit(kind: str = "final", text: str = ""):
-    line = None
     if kind == "ready":
         line = "event: ready"
     elif kind == "partial":
@@ -121,7 +113,8 @@ async def emit(kind: str = "final", text: str = ""):
         line = f"final: {text}"
     else:
         return {"ok": False, "error": "bad kind"}
-    os.makedirs(os.path.dirname(LOG_PATH) or "/", exist_ok=True)
+    # 确保 /tmp 目录存在（Render 默认存在）
     with open(LOG_PATH, "a", encoding="utf-8") as f:
         f.write(line + "\n")
     return {"ok": True, "wrote": line}
+
