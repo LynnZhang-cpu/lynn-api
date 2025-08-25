@@ -158,27 +158,18 @@ async def mic():
 
 @app.post("/stt", response_class=PlainTextResponse)
 async def stt(file: UploadFile = File(...)):
-    import io, os
-    # 检查依赖与密钥
-    try:
-        from openai import OpenAI
-    except Exception as e:
-        return f"ERROR: openai lib not installed: {e}"
-    if not os.getenv("OPENAI_API_KEY"):
-        return "ERROR: OPENAI_API_KEY missing"
-
+    from openai import OpenAI
+    client = OpenAI()
     data = await file.read()
     bio = io.BytesIO(data)
     try:
-        client = OpenAI()
         resp = client.audio.transcriptions.create(
-            model="gpt-4o-mini-transcribe",  # 或 whisper-1
+            model="gpt-4o-mini-transcribe",
             file=("chunk.webm", bio, file.content_type or "audio/webm")
         )
         text = (resp.text or "").strip()
     except Exception as e:
         return f"ERROR: {e}"
-
     if text:
         with open(LOG_PATH, "a", encoding="utf-8") as f:
             f.write(f"final: {text}\n")
