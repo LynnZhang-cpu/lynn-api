@@ -1,21 +1,27 @@
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, StreamingResponse, PlainTextResponse
+from fastapi.responses import PlainTextResponse
+from fastapi.middleware.cors import CORSMiddleware
 import os, asyncio
 from dotenv import load_dotenv
 from datetime import datetime
 
 load_dotenv()
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-LOG_PATH = os.path.expanduser(os.getenv("LOG_PATH", "~/Desktop/sse.log"))
+LOG_PATH = os.path.expanduser(os.getenv("LOG_PATH", "/tmp/sse.log"))
 
 transcript_buffer = []
 _last_final = ""
 _last_line = ""
 _last_time = ""
-broadcast_queue: asyncio.Queue[str] = asyncio.Queue()
-
-html = """<!doctype html><html><head><meta charset="utf-8"><title>实时文字监看器</title><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;display:flex;flex-direction:column;gap:8px;padding:16px;background:#0b1020;color:#e6e9ef}h1{margin:0;font-size:20px}#stat{font-size:12px;opacity:.8}#log{white-space:pre-wrap;background:#0f172a;border-radius:12px;padding:12px;line-height:1.4;max-height:70vh;overflow:auto;border:1px solid #223}mark{background:#fde68a;color:#111;border-radius:6px;padding:0 4px}b{color:#a7f3d0}</style></head><body><h1>实时文字监看器</h1><div id="stat"></div><div id="log"></div><script>const el=document.getElementById("log");const st=document.getElementById("stat");let c=0;const es=new EventSource("/stream");es.onmessage=(e)=>{c++;st.textContent="已接收: "+c;let t=e.data||"";let k=["event:","partial","final","text","ready"];k.forEach(x=>{t=t.replaceAll(x,"<mark>"+x+"</mark>")});if(t.includes("partial"))t=t.replaceAll("partial","<b>partial</b>");if(t.includes("final"))t=t.replaceAll("final","<b>final</b>");el.innerHTML+=t+"\\n";el.scrollTop=el.scrollHeight;};es.onerror=(e)=>{st.textContent="连接中断，自动重试中...";};document.addEventListener("keydown",(e)=>{if(e.key==="s"||e.key==="S"){fetch("/start")}if(e.key==="e"||e.key==="E"){fetch("/end").then(r=>r.text()).then(t=>{console.log("逐字稿：\\n"+t);});}});</script></body></html>"""
+queue: asyncio.Queue[str] = asyncio.Queue()
 
 def _extract_final_text(line: str):
     s = line.strip()
@@ -41,7 +47,7 @@ async def _watch_log():
                 continue
             _last_line = line.rstrip()
             _last_time = datetime.now().strftime("%H:%M:%S")
-            await broadcast_queue.put(_last_line)
+            await queue.put(_last_line)
             txt = _extract_final_text(line)
             if txt and txt != _last_final:
                 transcript_buffer.append(txt)
@@ -51,17 +57,12 @@ async def _watch_log():
 async def _startup():
     asyncio.create_task(_watch_log())
 
-@app.get("/", response_class=HTMLResponse)
-async def index():
-    return HTMLResponse(html)
-
-@app.get("/stream")
-async def stream():
-    async def gen():
-        while True:
-            line = await broadcast_queue.get()
-            yield f"data: {line}\n\n"
-    return StreamingResponse(gen(), media_type="text/event-stream")
+@app.get("/start")
+async def start():
+    global _last_final
+    transcript_buffer.clear()
+    _last_final = ""
+    return {"status": "listening", "message": "问诊已开始，缓冲区已清空"}
 
 @app.get("/latest", response_class=PlainTextResponse)
 async def latest():
@@ -70,17 +71,25 @@ async def latest():
 @app.get("/end", response_class=PlainTextResponse)
 async def end():
     global _last_final
-    final_text = "\n".join(transcript_buffer)
+    text = "\n".join(transcript_buffer)
     transcript_buffer.clear()
     _last_final = ""
-    return final_text
+    return text
 
-@app.get("/start")
-async def start():
+@app.get("/rebuild", response_class=PlainTextResponse)
+async def rebuild():
     global _last_final
     transcript_buffer.clear()
     _last_final = ""
-    return {"status": "listening", "message": "问诊已开始，缓冲区已清空"}
+    if not os.path.exists(LOG_PATH):
+        return ""
+    with open(LOG_PATH, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            txt = _extract_final_text(line)
+            if txt and txt != _last_final:
+                transcript_buffer.append(txt)
+                _last_final = txt
+    return "\n".join(transcript_buffer)
 
 @app.get("/debug")
 async def debug():
@@ -92,18 +101,3 @@ async def debug():
         "lastTime": _last_time,
         "logExists": os.path.exists(LOG_PATH),
     }
-
-@app.get("/rebuild", response_class=PlainTextResponse)
-async def rebuild():
-    global _last_final
-    transcript_buffer.clear()
-    _last_final = ""
-    if not os.path.exists(LOG_PATH):
-        return "log file not found"
-    with open(LOG_PATH, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            txt = _extract_final_text(line)
-            if txt and txt != _last_final:
-                transcript_buffer.append(txt)
-                _last_final = txt
-    return "\n".join(transcript_buffer)
