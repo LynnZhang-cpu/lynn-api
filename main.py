@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
-import os, asyncio, io
+import os, asyncio, io, requests
 from dotenv import load_dotenv
 from datetime import datetime
 
@@ -9,15 +9,14 @@ load_dotenv()
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"], allow_credentials=True,
+    allow_methods=["*"], allow_headers=["*"],
 )
 
+APP_VERSION = "mic-requests-v3"   # 用于确认是否部署到新版本
 LOG_PATH = os.path.expanduser(os.getenv("LOG_PATH", "/tmp/sse.log"))
 
-transcript_buffer = []
+transcript_buffer: list[str] = []
 _last_final = ""
 _last_line = ""
 _last_time = ""
@@ -27,10 +26,7 @@ def _extract_final_text(line: str):
     if "final" not in s:
         return None
     i = s.find("final")
-    rest = s[i+5:]
-    rest = rest.lstrip(" :\t")
-    rest = rest.split("#", 1)[0]
-    rest = rest.strip()
+    rest = s[i+5:].lstrip(" :\t").split("#", 1)[0].strip()
     return rest or None
 
 async def _watch_log():
@@ -42,8 +38,7 @@ async def _watch_log():
         while True:
             line = f.readline()
             if not line:
-                await asyncio.sleep(0.2)
-                continue
+                await asyncio.sleep(0.2); continue
             _last_line = line.rstrip()
             _last_time = datetime.now().strftime("%H:%M:%S")
             txt = _extract_final_text(line)
@@ -55,11 +50,14 @@ async def _watch_log():
 async def _startup():
     asyncio.create_task(_watch_log())
 
+@app.get("/version", response_class=PlainTextResponse)
+async def version():
+    return APP_VERSION
+
 @app.get("/start")
 async def start():
     global _last_final
-    transcript_buffer.clear()
-    _last_final = ""
+    transcript_buffer.clear(); _last_final = ""
     return {"status": "listening", "message": "问诊已开始，缓冲区已清空"}
 
 @app.get("/latest", response_class=PlainTextResponse)
@@ -70,23 +68,20 @@ async def latest():
 async def end():
     global _last_final
     text = "\n".join(transcript_buffer)
-    transcript_buffer.clear()
-    _last_final = ""
+    transcript_buffer.clear(); _last_final = ""
     return text
 
 @app.get("/rebuild", response_class=PlainTextResponse)
 async def rebuild():
     global _last_final
-    transcript_buffer.clear()
-    _last_final = ""
+    transcript_buffer.clear(); _last_final = ""
     if not os.path.exists(LOG_PATH):
         return ""
     with open(LOG_PATH, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
             txt = _extract_final_text(line)
             if txt and txt != _last_final:
-                transcript_buffer.append(txt)
-                _last_final = txt
+                transcript_buffer.append(txt); _last_final = txt
     return "\n".join(transcript_buffer)
 
 @app.get("/debug")
@@ -114,9 +109,10 @@ async def emit(kind: str = "final", text: str = ""):
         f.write(line + "\n")
     return {"ok": True, "wrote": line}
 
+# ------ 前端麦克风网页 ------
 html_mic = """
 <!doctype html><html><head><meta charset="utf-8">
-<title>语音转写</title><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>实时语音转写</title><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;padding:16px;background:#0b1020;color:#e6e9ef}
 h1{margin:0 0 12px;font-size:18px}
@@ -142,7 +138,7 @@ async function startRec(){
       try{
         const r = await fetch('/stt', {method:'POST', body: fd});
         const text = await r.text(); if(text && text.trim()) append(text.trim());
-      }catch(err){console.error(err);}
+      }catch(err){append('ERROR: '+err);}
     }
   };
   rec.start(2000); startBtn.disabled=true; stopBtn.disabled=false;
@@ -156,36 +152,32 @@ startBtn.onclick=startRec; stopBtn.onclick=stopRec;
 async def mic():
     return HTMLResponse(html_mic)
 
+# ------ 直连 OpenAI 语音转写（requests）------
 @app.post("/stt", response_class=PlainTextResponse)
 async def stt(file: UploadFile = File(...)):
-    import requests, os
     if not os.getenv("OPENAI_API_KEY"):
         return "ERROR: OPENAI_API_KEY missing"
-
     data_bytes = await file.read()
-    files = {
-        "file": ("chunk.webm", data_bytes, file.content_type or "audio/webm")
-    }
-    form = {
-        "model": "gpt-4o-mini-transcribe"  # 或改成 whisper-1
-    }
+    files = {"file": ("chunk.webm", data_bytes, file.content_type or "audio/webm")}
+    form = {"model": "gpt-4o-mini-transcribe"}  # 或 "whisper-1"
     try:
         r = requests.post(
             "https://api.openai.com/v1/audio/transcriptions",
             headers={"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"},
-            files=files,
-            data=form,
-            timeout=60,
+            files=files, data=form, timeout=60,
         )
         if r.status_code != 200:
             return f"ERROR: {r.status_code} {r.text}"
         text = (r.json().get("text") or "").strip()
     except Exception as e:
         return f"ERROR: {e}"
-
     if text:
+        # 立即写日志
         with open(LOG_PATH, "a", encoding="utf-8") as f:
             f.write(f"final: {text}\n")
+        # 也直接推入缓冲，首个分段就能看到
+        if not transcript_buffer or transcript_buffer[-1] != text:
+            transcript_buffer.append(text)
     return text
 
 
