@@ -158,18 +158,31 @@ async def mic():
 
 @app.post("/stt", response_class=PlainTextResponse)
 async def stt(file: UploadFile = File(...)):
-    from openai import OpenAI
-    client = OpenAI()
-    data = await file.read()
-    bio = io.BytesIO(data)
+    import requests, os
+    if not os.getenv("OPENAI_API_KEY"):
+        return "ERROR: OPENAI_API_KEY missing"
+
+    data_bytes = await file.read()
+    files = {
+        "file": ("chunk.webm", data_bytes, file.content_type or "audio/webm")
+    }
+    form = {
+        "model": "gpt-4o-mini-transcribe"  # 或改成 whisper-1
+    }
     try:
-        resp = client.audio.transcriptions.create(
-            model="gpt-4o-mini-transcribe",
-            file=("chunk.webm", bio, file.content_type or "audio/webm")
+        r = requests.post(
+            "https://api.openai.com/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"},
+            files=files,
+            data=form,
+            timeout=60,
         )
-        text = (resp.text or "").strip()
+        if r.status_code != 200:
+            return f"ERROR: {r.status_code} {r.text}"
+        text = (r.json().get("text") or "").strip()
     except Exception as e:
         return f"ERROR: {e}"
+
     if text:
         with open(LOG_PATH, "a", encoding="utf-8") as f:
             f.write(f"final: {text}\n")
