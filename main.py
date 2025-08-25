@@ -100,6 +100,7 @@ async def debug():
         "logExists": os.path.exists(LOG_PATH),
     }
 
+# 测试喂入日志（ready/partial/final）
 @app.get("/emit")
 async def emit(kind: str = "final", text: str = ""):
     if kind == "ready":
