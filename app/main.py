@@ -110,3 +110,18 @@ line = await broadcast_queue.get()
 yield f"data: {line}\n\n"
 return StreamingResponse(gen(), media_type="text/event-stream")
 PY
+@app.get("/emit")
+async def emit(kind: str = "final", text: str = ""):
+    line = None
+    if kind == "ready":
+        line = "event: ready"
+    elif kind == "partial":
+        line = f"partial: {text}"
+    elif kind == "final":
+        line = f"final: {text}"
+    else:
+        return {"ok": False, "error": "bad kind"}
+    os.makedirs(os.path.dirname(LOG_PATH) or "/", exist_ok=True)
+    with open(LOG_PATH, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+    return {"ok": True, "wrote": line}
