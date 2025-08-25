@@ -1,3 +1,5 @@
-fastapi
-uvicorn
-openai
+cat > requirements.txt << 'TXT'
+fastapi==0.111.1
+uvicorn==0.30.1
+python-dotenv==1.0.1
+TXT

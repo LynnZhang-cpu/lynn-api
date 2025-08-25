@@ -1,0 +1,96 @@
+from __future__ import annotations
+import os, secrets
+from pathlib import Path
+from typing import Optional
+
+from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+
+# 兼容两种环境变量名
+API_TOKEN = (os.getenv("LYNN_API_TOKEN") or os.getenv("API_TOKEN") or "").strip()
+
+# ---------- FastAPI 实例（名字必须叫 app） ----------
+app = FastAPI(
+    title="诊所智能语音助手 API",
+    description="Whisper 转写 + 生成 SOAP 的工作流接口",
+    version="1.0.0",
+)
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ---------- 鉴权 ----------
+bearer_scheme = HTTPBearer(auto_error=False)
+
+def auth(creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme)):
+    if not API_TOKEN:  # 未设置 token 时放行（开发期）
+        return
+    if creds is None or creds.scheme.lower() != "bearer":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authenticated")
+    client_token = (creds.credentials or "").strip()
+    if not secrets.compare_digest(client_token, API_TOKEN):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+# ---------- 模型 ----------
+class SoapRequest(BaseModel):
+    text: str
+
+class SoapResponse(BaseModel):
+    subjective: str
+    objective: str
+    assessment: str
+    plan: str
+
+class TranscribeResponse(BaseModel):
+    transcription: str
+
+# ---------- 简单 SOAP 生成占位 ----------
+def generate_soap(text: str) -> SoapResponse:
+    subj = text[:200] if text else "（空）"
+    return SoapResponse(
+        subjective=f"主诉：{subj}",
+        objective="客观：生命体征平稳。",
+        assessment="评估：外感风热（示例）。",
+        plan="计划：宣肺清热；银翘散；针刺合谷、曲池、外关（示例）。"
+    )
+
+# ---------- 路由 ----------
+@app.get("/health", tags=["meta"])
+def health():
+    return {"ok": True, "service": "Lynn", "version": "0.0.2"}
+
+@app.get("/meta", tags=["meta"], dependencies=[Depends(auth)])
+def meta():
+    return {"service": "clinic-voice-assistant", "version": "1.0.0"}
+
+@app.post("/transcribe", tags=["audio"], response_model=TranscribeResponse, dependencies=[Depends(auth)])
+async def transcribe(file: UploadFile = File(...)):
+    text = f"(占位转写) 收到文件：{file.filename}"
+    return TranscribeResponse(transcription=text)
+
+@app.post("/soap-from-audio", tags=["audio"], response_model=SoapResponse, dependencies=[Depends(auth)])
+async def soap_from_audio(file: UploadFile = File(...)):
+    text = f"(占位转写) 收到文件：{file.filename}"
+    return generate_soap(text)
+
+@app.post("/soap", tags=["tcm"], response_model=SoapResponse, dependencies=[Depends(auth)])
+def soap_from_text(body: SoapRequest):
+    return generate_soap(body.text)
+
+# 提供 public/openapi.yaml（可选）
+ROOT_DIR = Path(__file__).resolve().parents[1]
+OPENAPI_YAML_PATH = ROOT_DIR / "public" / "openapi.yaml"
+
+@app.get("/openapi.yaml", include_in_schema=False)
+def serve_openapi_yaml():
+    if OPENAPI_YAML_PATH.exists():
+        return FileResponse(str(OPENAPI_YAML_PATH), media_type="text/yaml")
+    raise HTTPException(status_code=404, detail=f"openapi.yaml not found at {OPENAPI_YAML_PATH}")

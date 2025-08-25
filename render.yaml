@@ -1,9 +1,9 @@
+cat > render.yaml << 'YML'
 services:
-  - type: web
-    name: lynn-api
-    env: python
-    plan: starter
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
-    healthCheckPath: /health
-    autoDeploy: true
+
+type: web
+name: lynn-api
+env: python
+buildCommand: pip install -r requirements.txt
+startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+YML
