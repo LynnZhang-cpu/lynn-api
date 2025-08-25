@@ -21,7 +21,6 @@ transcript_buffer = []
 _last_final = ""
 _last_line = ""
 _last_time = ""
-queue: asyncio.Queue[str] = asyncio.Queue()
 
 def _extract_final_text(line: str):
     s = line.strip()
@@ -47,7 +46,6 @@ async def _watch_log():
                 continue
             _last_line = line.rstrip()
             _last_time = datetime.now().strftime("%H:%M:%S")
-            await queue.put(_last_line)
             txt = _extract_final_text(line)
             if txt and txt != _last_final:
                 transcript_buffer.append(txt)
@@ -101,3 +99,18 @@ async def debug():
         "lastTime": _last_time,
         "logExists": os.path.exists(LOG_PATH),
     }
+
+@app.get("/emit")
+async def emit(kind: str = "final", text: str = ""):
+    if kind == "ready":
+        line = "event: ready"
+    elif kind == "partial":
+        line = f"partial: {text}"
+    elif kind == "final":
+        line = f"final: {text}"
+    else:
+        return {"ok": False, "error": "bad kind"}
+    with open(LOG_PATH, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+    return {"ok": True, "wrote": line}
+
